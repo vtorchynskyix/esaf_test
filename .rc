@@ -1,0 +1,47 @@
+# -*- mode: sh -*-
+echo "loading $top/.rc"
+
+.rl () {
+    source $top/.rc
+}
+
+.cleanstm () {
+    rm -rf ~/.stm32cubeide
+    rm -rf ~/.stm32cubemx
+    rm -rf ~/.stm32cube
+    rm -rf ~/.stm32cufinder
+    rm -rf ~/STM32Cube
+}
+
+.idedocs () {
+    brave https://www.st.com/resource/en/user_manual/um2609-stm32cubeide-user-guide-stmicroelectronics.pdf
+}
+
+.wot () {
+    sudo st-info --probe
+}
+
+.flash() {
+    (
+        set -e
+        export PS4="~~~ "
+        set -x
+        make
+        sudo st-flash write build/zhalo.bin 0x08000000
+        sleep 0.5
+        sudo st-flash reset
+    )
+}
+
+.st-link () {
+    sudo st-info --probe
+    sudo st-util --serial 12002900010000524A51544E
+}
+
+.gdb () {
+    arm-none-eabi-gdb -ix .gdbinit
+}
+
+.rst () {
+    sudo st-flash reset
+}

@@ -1,0 +1,14 @@
+*.d
+*.su
+*.elf
+*.list
+*.map
+*.bak
+.metadata
+*.o
+*.bin
+*.hex
+*.lst
+./build
+*.log
+
