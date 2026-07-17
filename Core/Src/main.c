@@ -1,6 +1,6 @@
 #include "main.h"
 #include "esad.h"
-#include "leds.h"
+
 #include "lsm6ds3_reg.h"
 #include "stdio.h"
 #include "stdlib.h"
@@ -11,159 +11,26 @@
 
 ADC_HandleTypeDef  hadc1;
 SPI_HandleTypeDef  hspi1;
-TIM_HandleTypeDef  htim16;
-TIM_HandleTypeDef  htim17;
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
-TIM_HandleTypeDef *timer_seconds = &htim16;
-TIM_HandleTypeDef *timer_20ms    = &htim17;
 
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_SPI2_Init(void);
-#ifdef DEBUG
 static void MX_USART2_UART_Init(void);
-#endif
 static void MX_USART1_UART_Init(void);
-static void MX_TIM16_Init(void);
-static void MX_TIM17_Init(void);
 void adc_select_batt(void);
-void adc_select_temp(void);
-void detonate();
-void undetonate();
 
-volatile uint32_t metric_threshold;
-static esad_msg_t in_cmd, out_cmd;
+static uint8_t chip_id= 0;
 static stmdev_ctx_t dev_ctx;
-static uint32_t metric_acc = 0;
-static uint32_t metric_ang = 0;
-static uint32_t metric_max_acc = 0;
-static uint32_t metric_max_ang = 0;
-static state_t state;
+static uint8_t response[3] = {0};
+uint8_t c1;
+uint8_t c2;
 
-#define UART_BUFFER_SIZE 64 // Small buffer size for this example
+void drop_one_byte() { HAL_UART_Receive_IT(&huart1, &c1, 1); }
 
-typedef struct {
-    uint8_t buffer[UART_BUFFER_SIZE];
-    uint16_t head;
-    uint16_t tail;
-    uint16_t count;
-} CircularBuffer;
-
-CircularBuffer uartBuffer;
-
-void cb_init(CircularBuffer *cb);
-int  cb_write(CircularBuffer *cb, uint8_t data);
-int  cb_read(CircularBuffer *cb, uint8_t *data);
-int  cb_count(CircularBuffer *cb);
-
-void cb_init(CircularBuffer *cb)
-{
-    cb->head = 0;
-    cb->tail = 0;
-    cb->count = 0;
-}
-
-int cb_write(CircularBuffer *cb, uint8_t data)
-{
-    if (cb->count < UART_BUFFER_SIZE) {
-        cb->buffer[cb->head] = data;
-        cb->head = (cb->head + 1) % UART_BUFFER_SIZE;
-        cb->count++;
-        return 1;  // Success
-    }
-    return 0;  // Buffer full
-}
-
-int cb_read(CircularBuffer *cb, uint8_t *data)
-{
-    if (cb->count > 0) {
-        *data = cb->buffer[cb->tail];
-        cb->tail = (cb->tail + 1) % UART_BUFFER_SIZE;
-        cb->count--;
-        return 1;  // Success
-    }
-    return 0;  // Buffer empty
-}
-
-int cb_count(CircularBuffer *cb)
-{
-    return cb->count;
-}
-
-uint16_t secs_to_armable()
-{
-    return params.ARMING_DELAY_SECS < state.uptime_secs
-               ? 0
-               : params.ARMING_DELAY_SECS - state.uptime_secs;
-}
-
-uint16_t secs_to_selfdestroy()
-{
-    return params.SELF_DESTRUCT_DELAY_SEC < state.secs_after_arm
-               ? 0
-               : params.SELF_DESTRUCT_DELAY_SEC - state.secs_after_arm;
-}
-
-void on_start()
-{
-    state.fired_latch = 0;
-    state.arm_switch_on = 0;
-    state.fire_switch_on = 0;
-    state.fc_timeout = 0xFF;
-    state.fc_version_ok = 0;
-    state.uptime_secs = 0;
-    state.secs_after_arm = 0;
-}
-
-void run_safe()
-{
-    undetonate();
-    set_green(0);
-    state.arm_switch_on = 0;
-    state.fire_switch_on = 0;
-    state.secs_after_arm = 0;
-    out_cmd.command = safe;
-    out_cmd.data = secs_to_armable();
-}
-
-void run_arm()
-{
-    if (secs_to_armable() != 0) {
-        run_safe();
-        return;
-    }
-
-    out_cmd.command = state.fired_latch ? fire : arm;
-    out_cmd.data = default_data;
-    state.arm_switch_on = 1;
-    set_green(1);
-}
-
-void run_version()
-{
-    state.fc_version_ok = (in_cmd.data == sadcp_version);
-
-    out_cmd.command = version;
-    out_cmd.data = sadcp_version;
-}
-
-void run_fire()
-{
-    if (state.arm_switch_on) {
-        state.fire_switch_on = 1;
-        out_cmd.command = fire;
-        return;
-    } else {
-        run_safe();
-    }
-}
-
-uint8_t c;
-void drop_one_byte() { HAL_UART_Receive_IT(&huart1, &c, 1); }
-
-static int32_t platform_write(void *handle, uint8_t reg, const uint8_t *bufp,
+static int32_t platform_write(SPI_HandleTypeDef *handle, uint8_t reg, const uint8_t *bufp,
                               uint16_t len)
 {
     /* Write multiple command */
@@ -174,7 +41,7 @@ static int32_t platform_write(void *handle, uint8_t reg, const uint8_t *bufp,
     return 0;
 }
 
-static int32_t platform_read(void *handle, uint8_t reg, uint8_t *bufp,
+static int32_t platform_read(SPI_HandleTypeDef *handle, uint8_t reg, uint8_t *bufp,
                              uint16_t len)
 {
     reg |= 0x80;
@@ -184,26 +51,6 @@ static int32_t platform_read(void *handle, uint8_t reg, uint8_t *bufp,
     HAL_GPIO_WritePin(CS_GPIO_Port, CS_Pin, GPIO_PIN_SET);
 
     return 0;
-}
-
-void undetonate()
-{
-    if (!state.fired_latch) return;
-    state.fired_latch = 0;
-
-    HAL_GPIO_WritePin(FIRE1_GPIO_Port, FIRE1_Pin, 0);
-    HAL_GPIO_WritePin(FIRE2_GPIO_Port, FIRE2_Pin, 0);
-    HAL_Delay(200);
-}
-
-void detonate()
-{
-    if (state.fired_latch) return;
-    state.fired_latch = 1;
-
-    HAL_GPIO_WritePin(FIRE1_GPIO_Port, FIRE1_Pin, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(FIRE2_GPIO_Port, FIRE2_Pin, GPIO_PIN_SET);
-    HAL_Delay(200);
 }
 
 enum blasting_test {
@@ -218,42 +65,6 @@ uint16_t adc_to_mv(int adcValue)
     const int adcMaxValue = 4095;         // Maximum ADC value for 12-bit resolution
     const double voltagePerStep = (referenceVoltage * 1000) / adcMaxValue;  // Voltage per step in mV
     return (uint16_t)((adcValue * voltagePerStep) * 2.98);
-}
-
-static bool battery_check(void)
-{
-    const uint16_t bat_ok_threshold = 8500;
-    uint16_t mv = 0;
-    HAL_GPIO_WritePin(BAT_TEST_GPIO_Port, BAT_TEST_Pin, GPIO_PIN_SET);
-    adc_select_batt();
-    HAL_ADC_Start(&hadc1);
-    HAL_ADC_PollForConversion(&hadc1, 1000);
-    mv = adc_to_mv(HAL_ADC_GetValue(&hadc1));
-    HAL_ADC_Stop(&hadc1);
-    HAL_GPIO_WritePin(BAT_TEST_GPIO_Port, BAT_TEST_Pin, GPIO_PIN_RESET);
-
-    return mv > bat_ok_threshold ? true:false;
-}
-
-
-#define VDDA_APPLI                     ((uint32_t) 3300)        /* Value of analog reference voltage (Vref+), connected to analog voltage supply Vdda (unit: mV) */
-#define TEMPSENSOR_TYP_CAL1_V          (( int32_t)  760)        /* Internal temperature sensor, parameter V30 (unit: mV). Refer to device datasheet for min/typ/max values. */
-#define TEMPSENSOR_TYP_AVGSLOPE        (( int32_t) 2500)        /* Internal temperature sensor, parameter Avg_Slope (unit: uV/DegCelsius). Refer to device datasheet for min/typ/max values. */
-#define TEMPSENSOR_CAL_VREF            ((uint32_t) 3000)        /* Vdda value with which temperature sensor has been calibrated in production (+-10 mV). */
-static uint16_t temp_check(void)
-{
-    adc_select_temp();
-    HAL_ADC_Start(&hadc1);
-    HAL_ADC_PollForConversion(&hadc1, 1000);
-    uint16_t val = HAL_ADC_GetValue(&hadc1);
-    HAL_ADC_Stop(&hadc1);
-    uint16_t temperature = __LL_ADC_CALC_TEMPERATURE_TYP_PARAMS(TEMPSENSOR_TYP_AVGSLOPE,
-                                                        TEMPSENSOR_TYP_CAL1_V,
-                                                        TEMPSENSOR_CAL1_TEMP,
-                                                        VDDA_APPLI,
-                                                        val,
-                                                        LL_ADC_RESOLUTION_12B);
-    return temperature;
 }
 
 static uint8_t blasting_cap_check()
@@ -280,17 +91,6 @@ static uint8_t blasting_cap_check()
     return status;
 }
 
-#define BYTE_TO_BINARY_PATTERN "%c%c%c%c%c%c%c%c"
-#define BYTE_TO_BINARY(byte)  \
-  ((byte) & 0x80 ? '1' : '0'), \
-  ((byte) & 0x40 ? '1' : '0'), \
-  ((byte) & 0x20 ? '1' : '0'), \
-  ((byte) & 0x10 ? '1' : '0'), \
-  ((byte) & 0x08 ? '1' : '0'), \
-  ((byte) & 0x04 ? '1' : '0'), \
-  ((byte) & 0x02 ? '1' : '0'), \
-  ((byte) & 0x01 ? '1' : '0')
-
 void adc_select_batt(void) {
     ADC_ChannelConfTypeDef sConfig = {0};
     sConfig.Channel = ADC_CHANNEL_16;
@@ -301,40 +101,85 @@ void adc_select_batt(void) {
     }
 }
 
-void adc_select_temp(void)
+void process_command(uint8_t cmd)
 {
-    ADC_ChannelConfTypeDef sConfig = {0};
-    sConfig.Channel = ADC_CHANNEL_TEMPSENSOR;
-    sConfig.Rank = 1;
-    sConfig.SamplingTime = ADC_SAMPLETIME_160CYCLES_5;
-    if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK) {
-        Error_Handler();
-    }
+    /* --------- Decode command bits --------- */
+
+    HAL_GPIO_WritePin(LED1_GPIO_Port, LED1_Pin,
+                      (cmd & (1 << 0)) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+
+    HAL_GPIO_WritePin(LED2_GPIO_Port, LED2_Pin,
+                      (cmd & (1 << 1)) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+
+    HAL_GPIO_WritePin(LED3_GPIO_Port, LED3_Pin,
+                      (cmd & (1 << 2)) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+
+    HAL_GPIO_WritePin(FIRE1_GPIO_Port, FIRE1_Pin,
+                      (cmd & (1 << 3)) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+
+    /* --------- Prepare response --------- */
+
+    /* Byte 0 — accelerometer ID */
+    lsm6ds3_device_id_get(&dev_ctx, &chip_id);
+    response[0] = chip_id;
+
+    /* Byte 1 — ADC integer voltage */
+    HAL_ADC_Start(&hadc1);
+    HAL_ADC_PollForConversion(&hadc1, 10);
+    adc_select_batt();
+    uint16_t adc_raw = HAL_ADC_GetValue(&hadc1);
+    uint16_t mv = adc_to_mv(adc_raw);
+    response[1] = (uint8_t)((mv / 1000) * 2);  // integer volts
+
+    /* Byte 2 — status bits */
+    uint8_t status = 0;
+
+    uint8_t cap_status = blasting_cap_check();
+
+    if (cap_status == CAP_OK)
+        status |= (1 << 0);
+
+    if (HAL_GPIO_ReadPin(SHUNT_POS_GPIO_Port, SHUNT_POS_Pin))
+        status |= (1 << 1);
+
+    if (!HAL_GPIO_ReadPin(SIG_1_GPIO_Port, SIG_Pin_1))
+        status |= (1 << 2);
+
+    if (!HAL_GPIO_ReadPin(SIG_2_GPIO_Port, SIG_Pin_2))
+        status |= (1 << 3);
+
+    if (!HAL_GPIO_ReadPin(SIG_3_GPIO_Port, SIG_Pin_3))
+        status |= (1 << 4);
+
+    if (!HAL_GPIO_ReadPin(SIG_4_GPIO_Port, SIG_Pin_4))
+        status |= (1 << 5);
+
+    if (!HAL_GPIO_ReadPin(SIG_5_GPIO_Port, SIG_Pin_5))
+        status |= (1 << 6);
+
+    response[2] = status;
+
+    /* --------- Send response --------- */
+    HAL_UART_Transmit_IT(&huart1, response, 3);
 }
 
-static uint8_t output_flip = 0;
+int _kill(int, int) { return -1; }
+int _getpid() { return 1; }
+void _exit(int) { while(1) { } }
+
 int main(void)
 {
-    uint8_t  reg;
     HAL_Init();
-    SystemClock_Config();
-    on_start();
+    //SystemClock_Config();
     MX_GPIO_Init();
     MX_ADC1_Init();
     MX_SPI2_Init();
-    cb_init(&uartBuffer);
-    #ifdef DEBUG
     MX_USART2_UART_Init();
-    #endif
     MX_USART1_UART_Init();
-    MX_TIM16_Init();
-    MX_TIM17_Init();
-    startup_flash();
-    static i16xyz_t acceleration, angular_rate;
-    dev_ctx.write_reg = platform_write;
-    dev_ctx.read_reg = platform_read;
+    dev_ctx.write_reg = (stmdev_write_ptr)platform_write;
+    dev_ctx.read_reg = (stmdev_read_ptr)platform_read;
     dev_ctx.handle = &hspi1;
-    HAL_Delay(params.BOOT_DELAY_MSEC);
+    HAL_Delay(20);
 
     /* Restore default configuration */
     lsm6ds3_reset_set(&dev_ctx, PROPERTY_ENABLE);
@@ -355,14 +200,11 @@ int main(void)
     lsm6ds3_gy_data_rate_set(&dev_ctx, LSM6DS3_GY_ODR_1k66Hz);
     lsm6ds3_xl_power_mode_set(&dev_ctx, LSM6DS3_XL_HIGH_PERFORMANCE);
     lsm6ds3_gy_power_mode_set(&dev_ctx, LSM6DS3_GY_HIGH_PERFORMANCE);
-    
-    doubledouble_flash();
+    lsm6ds3_device_id_get(&dev_ctx, &chip_id);
 
     // Calibrate ADC at power up
     HAL_ADCEx_Calibration_Start(&hadc1);
-    
-    HAL_TIM_Base_Start_IT(timer_20ms);
-    HAL_UART_TxCpltCallback(&huart1);
+
     HAL_ADC_Start(&hadc1);
 
     HAL_Delay(1000);
@@ -370,74 +212,7 @@ int main(void)
     __enable_irq();
 
     while (1) {
-        if (blasting_cap_check() == CAP_OK) {
-            set_red(1);
-        }
 
-        if (blasting_cap_check() == CAP_NOT_CONNECTED) {
-            set_red(0);
-        }
-
-        if (blasting_cap_check() == CAP_SHORTED) {
-        	undetonate();
-            set_red(blink_pattern(5, 0xAA));
-            set_green(blink_pattern(5, 0xAA));
-            set_yellow(blink_pattern(5, 0xAA));
-        }
-
-        lsm6ds3_xl_flag_data_ready_get(&dev_ctx, &reg);
-        //lsm6ds3_xl_full_scale_set(&dev_ctx, LSM6DS3_16g);
-
-        metric_threshold = params.METRIC_HIT_THRESHOLD;
-
-        static i16xyz_t acc_prev;
-        if (reg) {
-            lsm6ds3_acceleration_raw_get(&dev_ctx, acceleration.mem);
-            metric_acc = (abs(acceleration.x - acc_prev.x) +
-                          abs(acceleration.y - acc_prev.y) +
-                          abs(acceleration.z - acc_prev.z));
-            if (metric_acc > metric_max_acc) metric_max_acc = metric_acc;
-
-            static uint32_t abs_sum = 0;
-            abs_sum =
-                abs(acceleration.x) + abs(acceleration.y) + abs(acceleration.z);
-
-            acc_prev = acceleration;
-
-            // don't run timers until first sensor data arrives
-            // to check if sensor gives data
-            // and the data is not (0, 0, 0)
-            if (HAL_TIM_Base_GetState(timer_seconds) == HAL_TIM_STATE_READY &&
-                (abs_sum > 0)) {
-                HAL_TIM_Base_Start_IT(timer_seconds);
-            }
-        }
-
-        static i16xyz_t ang_prev;
-
-        lsm6ds3_gy_flag_data_ready_get(&dev_ctx, &reg);
-        if (reg) {
-            lsm6ds3_angular_rate_raw_get(&dev_ctx, angular_rate.mem);
-
-            metric_ang = (abs(angular_rate.x - ang_prev.x) +
-                          abs(angular_rate.y - ang_prev.y) +
-                          abs(angular_rate.z - ang_prev.z));
-            if (metric_ang > metric_max_ang) metric_max_ang = metric_ang;
-            #ifdef DEBUG
-            sprintf((char *)uart_tx_buf, "SELF_DESTROY IN (SEC): %i\r\n", secs_to_selfdestroy());
-            HAL_UART_Transmit_IT(&huart2, uart_tx_buf,
-                                 strlen((char const *)uart_tx_buf));
-            #endif
-        } else {
-            metric_ang = 0;
-        }
-        ang_prev = angular_rate;
-
-        if (metric_ang > params.METRIC_HIT_THRESHOLD || metric_acc > params.METRIC_HIT_THRESHOLD) {
-            if (output_flip & 0x01) detonate();
-            else undetonate();
-            output_flip ^= 1;
-        }
     }
 }
 
@@ -530,43 +305,11 @@ static void MX_SPI2_Init(void)
     }
 }
 
-static void MX_TIM16_Init(void)
-{
-    htim16.Instance = TIM16;
-    htim16.Init.Prescaler = 8000 - 1;
-    htim16.Init.CounterMode = TIM_COUNTERMODE_UP;
-    htim16.Init.Period = 8000 - 1;
-    htim16.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-    htim16.Init.RepetitionCounter = 0;
-    htim16.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-    if (HAL_TIM_Base_Init(&htim16) != HAL_OK) {
-        Error_Handler();
-    }
-}
-
-static void MX_TIM17_Init(void)
-{
-    htim17.Instance = TIM17;
-    htim17.Init.Prescaler = 16000 - 1;
-    htim17.Init.CounterMode = TIM_COUNTERMODE_UP;
-    htim17.Init.Period = 22 - 1;
-    htim17.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-    htim17.Init.RepetitionCounter = 0;
-    htim17.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-    if (HAL_TIM_Base_Init(&htim17) != HAL_OK) {
-        Error_Handler();
-    }
-}
-
 static void MX_USART1_UART_Init(void)
 {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
     __HAL_RCC_USART1_CLK_ENABLE();
     __HAL_RCC_GPIOA_CLK_ENABLE();
-    /**USART2 GPIO Configuration
-    PA2     ------> USART2_TX
-    PA3     ------> USART2_RX
-    */
     GPIO_InitStruct.Pin = GPIO_PIN_9|GPIO_PIN_10;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
@@ -576,7 +319,7 @@ static void MX_USART1_UART_Init(void)
     HAL_NVIC_SetPriority(USART1_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(USART1_IRQn);
     huart1.Instance = USART1;
-    huart1.Init.BaudRate = 57600;
+    huart1.Init.BaudRate = 115200;
     huart1.Init.WordLength = UART_WORDLENGTH_8B;
     huart1.Init.StopBits = UART_STOPBITS_1;
     huart1.Init.Parity = UART_PARITY_NONE;
@@ -590,11 +333,9 @@ static void MX_USART1_UART_Init(void)
         Error_Handler();
     }
 
-    HAL_UART_Receive_IT(&huart1, uartBuffer.buffer, 1);
+    HAL_UART_Receive_IT(&huart1, &c1, 1);
 }
 
-
-#ifdef DEBUG
 static void MX_USART2_UART_Init(void)
 {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
@@ -606,8 +347,10 @@ static void MX_USART2_UART_Init(void)
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
     GPIO_InitStruct.Alternate = GPIO_AF1_USART2;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+    HAL_NVIC_SetPriority(USART2_IRQn, 3, 1);
+    HAL_NVIC_EnableIRQ(USART2_IRQn);
     huart2.Instance = USART2;
-    huart2.Init.BaudRate = 9600;
+    huart2.Init.BaudRate = 115200;
     huart2.Init.WordLength = UART_WORDLENGTH_8B;
     huart2.Init.StopBits = UART_STOPBITS_1;
     huart2.Init.Parity = UART_PARITY_NONE;
@@ -620,8 +363,9 @@ static void MX_USART2_UART_Init(void)
     if (HAL_UART_Init(&huart2) != HAL_OK) {
         Error_Handler();
     }
+
+    HAL_UART_Receive_IT(&huart2, &c2, 1);
 }
-#endif
 
 static void MX_GPIO_Init(void)
 {
@@ -637,18 +381,17 @@ static void MX_GPIO_Init(void)
     /*Configure GPIO pin Output Level */
     HAL_GPIO_WritePin(CS_GPIO_Port, CS_Pin, GPIO_PIN_RESET);
 
-    /*Configure GPIO pin : SIG_Pin */
-    /*GPIO_InitStruct.Pin = SIG_Pin_1;
+    GPIO_InitStruct.Pin = SIG_Pin_1;
     GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
     GPIO_InitStruct.Pull = GPIO_PULLUP;
-    HAL_GPIO_Init(SIG_1_GPIO_Port, &GPIO_InitStruct);*/
+    HAL_GPIO_Init(SIG_1_GPIO_Port, &GPIO_InitStruct);
 
     GPIO_InitStruct.Pin = SIG_Pin_2;
 	GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
 	GPIO_InitStruct.Pull = GPIO_PULLUP;
 	HAL_GPIO_Init(SIG_2_GPIO_Port, &GPIO_InitStruct);
 
-	/*GPIO_InitStruct.Pin = SIG_Pin_3;
+	GPIO_InitStruct.Pin = SIG_Pin_3;
 	GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
 	GPIO_InitStruct.Pull = GPIO_PULLUP;
 	HAL_GPIO_Init(SIG_3_GPIO_Port, &GPIO_InitStruct);
@@ -661,7 +404,7 @@ static void MX_GPIO_Init(void)
 	GPIO_InitStruct.Pin = SIG_Pin_5;
 	GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
 	GPIO_InitStruct.Pull = GPIO_PULLUP;
-	HAL_GPIO_Init(SIG_5_GPIO_Port, &GPIO_InitStruct);*/
+	HAL_GPIO_Init(SIG_5_GPIO_Port, &GPIO_InitStruct);
 
     HAL_NVIC_SetPriority(EXTI2_3_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(EXTI2_3_IRQn);
@@ -692,14 +435,6 @@ static void MX_GPIO_Init(void)
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
     HAL_GPIO_Init(IMU_INT_GPIO_Port, &GPIO_InitStruct);
 
-    /*Configure GPIO pin : BAT_TEST_Pin */
-    GPIO_InitStruct.Pin = BAT_TEST_Pin;
-    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_Init(BAT_TEST_GPIO_Port, &GPIO_InitStruct);
-    HAL_GPIO_WritePin(BAT_TEST_GPIO_Port, BAT_TEST_Pin, 0);
-
     /*Configure GPIO pin : CAP_OUT_Pin */
     GPIO_InitStruct.Pin = CAP_OUT_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
@@ -722,78 +457,48 @@ static void MX_GPIO_Init(void)
     HAL_GPIO_Init(CAP_IN_GPIO_Port, &GPIO_InitStruct);
 }
 
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
-{
-    uint8_t c;
-    if (htim == timer_seconds) {
-        if (CAP_SHORTED != blasting_cap_check()) state.uptime_secs++;
-        	else state.uptime_secs = 0;
-        if (state.arm_switch_on) state.secs_after_arm++;
-    } else if (htim == timer_20ms) {
-    	if(!state.comm_timeout) set_yellow(0);
-    	if (state.comm_timeout) state.comm_timeout--;
-        if (cb_count(&uartBuffer) >= 4) {
-            for (uint8_t i = 0; i < 4; i++) cb_read(&uartBuffer, &in_cmd.buf[i]);
-
-            out_cmd.mem = 0x00;
-            out_cmd.data = 0x00;
-
-            if (esad_msg_checksum(&in_cmd) == 0x0) {
-                switch (in_cmd.command) {
-                    case safe:
-                        run_safe();
-                        break;
-                    case fire:
-                        run_fire();
-                        break;
-                    case arm:
-                        run_arm();
-                        break;
-                    case no_radio:
-                        break;
-                    default: break;
-                }
-                state.comm_timeout = 5;
-                if (state.comm_timeout) set_yellow(1);
-                set_esad_msg_checksum(&out_cmd);
-                HAL_UART_Transmit_IT(&huart1, out_cmd.buf, 4);
-            } else {
-                cb_read(&uartBuffer, &c);
-            }
-        }
-    }
-}
-
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
-    drop_one_byte();
-}
-
-void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
-{
-    HAL_UART_Receive_IT(huart, in_cmd.buf, 4);
-}
-
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
-    if(huart->Instance == USART1) {
-        cb_write(&uartBuffer, huart->Instance->RDR & 0xFF);  // Read received byte and write to buffer
-        HAL_UART_Receive_IT(&huart1, uartBuffer.buffer, 1);  // Prepare for the next byte
+    if (huart->Instance == USART1)
+    {
+        HAL_UART_Receive_IT(&huart1, &c1, 1);
     }
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
+	if (huart->Instance == USART1) {
+		process_command(c1);
+
+		/* Restart reception */
+		HAL_UART_Receive_IT(&huart1, &c1, 1);
+	}
+
+	/* -------- USART2 INVERT ECHO TEST -------- */
+	else if (huart->Instance == USART2) {
+		uint8_t inverted = ~c2;
+
+		HAL_UART_Transmit(&huart2, &inverted, 1, 100);
+
+		HAL_UART_Receive_IT(&huart2, &c2, 1);
+	}
 }
 
 void HAL_GPIO_EXTI_Falling_Callback(uint16_t GPIO_Pin)
 {
-    if (GPIO_Pin == SIG_Pin_2 && state.arm_switch_on) {
-        //detonate();
+    if (GPIO_Pin == SIG_Pin_1) {
+    }
+    if (GPIO_Pin == SIG_Pin_2) {
+    }
+    if (GPIO_Pin == SIG_Pin_3) {
+    }
+    if (GPIO_Pin == SIG_Pin_4) {
+    }
+    if (GPIO_Pin == SIG_Pin_5) {
     }
 }
 
 void Error_Handler(void)
 {
-    set_green(1);
-    set_yellow(1);
-    set_red(1);
 
     __disable_irq();
     while (1) {

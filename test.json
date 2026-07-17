@@ -1,0 +1,10 @@
+[
+  {"type": "hex", "data": "01", "times": 1, "preDelay": 0, "postDelay": 0},
+  {"type": "hex", "data": "02", "times": 1, "preDelay": 100, "postDelay": 0},
+  {"type": "hex", "data": "04", "times": 1, "preDelay": 200, "postDelay": 0},
+  {"type": "hex", "data": "08", "times": 1, "preDelay": 300, "postDelay": 0},
+  {"type": "hex", "data": "08", "times": 1, "preDelay": 400, "postDelay": 0},
+  {"type": "hex", "data": "04", "times": 1, "preDelay": 500, "postDelay": 0},
+  {"type": "hex", "data": "02", "times": 1, "preDelay": 600, "postDelay": 0},
+  {"type": "hex", "data": "01", "times": 1, "preDelay": 700, "postDelay": 0}
+]
