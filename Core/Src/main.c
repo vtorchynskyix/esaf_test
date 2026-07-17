@@ -106,13 +106,13 @@ void process_command(uint8_t cmd)
     /* --------- Decode command bits --------- */
 
     HAL_GPIO_WritePin(LED1_GPIO_Port, LED1_Pin,
-                      (cmd & (1 << 0)) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+                      (cmd & (1 << 0)) ? GPIO_PIN_RESET : GPIO_PIN_SET);
 
     HAL_GPIO_WritePin(LED2_GPIO_Port, LED2_Pin,
-                      (cmd & (1 << 1)) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+                      (cmd & (1 << 1)) ? GPIO_PIN_RESET : GPIO_PIN_SET);
 
     HAL_GPIO_WritePin(LED3_GPIO_Port, LED3_Pin,
-                      (cmd & (1 << 2)) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+                      (cmd & (1 << 2)) ? GPIO_PIN_RESET : GPIO_PIN_SET);
 
     HAL_GPIO_WritePin(FIRE1_GPIO_Port, FIRE1_Pin,
                       (cmd & (1 << 3)) ? GPIO_PIN_SET : GPIO_PIN_RESET);
@@ -170,7 +170,7 @@ void _exit(int) { while(1) { } }
 int main(void)
 {
     HAL_Init();
-    //SystemClock_Config();
+    SystemClock_Config();
     MX_GPIO_Init();
     MX_ADC1_Init();
     MX_SPI2_Init();
